@@ -1534,6 +1534,47 @@ module attributes {"ttg.num-ctas" = 2 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
 
 // -----
 
+// A B operand that arrives through a convert_layout which moves data between
+// CTAs must keep that conversion: the local_alloc only writes each CTA's own
+// shared memory.
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [2, 2], order = [1, 0], CGALayout = [[1, 0]]}>
+module attributes {"ttg.num-ctas" = 2 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:100", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: @mmav5_keeps_cross_cta_operand_convert
+  // CHECK: %[[CVT:.+]] = ttg.convert_layout %arg1
+  // CHECK: ttg.local_alloc %[[CVT]]
+  // CHECK: ttng.tc_gen5_mma
+  tt.func public @mmav5_keeps_cross_cta_operand_convert(
+      %a: tensor<128x128xf16, #ttg.dot_op<{opIdx = 0, parent = #blocked}>>,
+      %b: tensor<128x64xf16, #blocked>) -> tensor<128x64xf32, #blocked> {
+    %bd = ttg.convert_layout %b : tensor<128x64xf16, #blocked> -> tensor<128x64xf16, #ttg.dot_op<{opIdx = 1, parent = #blocked}>>
+    %zero = arith.constant dense<0.000000e+00> : tensor<128x64xf32, #blocked>
+    %d = tt.dot %a, %bd, %zero : tensor<128x128xf16, #ttg.dot_op<{opIdx = 0, parent = #blocked}>> * tensor<128x64xf16, #ttg.dot_op<{opIdx = 1, parent = #blocked}>> -> tensor<128x64xf32, #blocked>
+    tt.return %d : tensor<128x64xf32, #blocked>
+  }
+}
+
+// -----
+
+// Native scaled MMAs keep the default operand layouts, which split B along K
+// when there is more than one CTA. Decompose them on multi-CTA kernels.
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [2, 2], order = [1, 0], CGALayout = [[1, 0]]}>
+module attributes {"ttg.num-ctas" = 2 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:100", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: @mmav5_scaled_multi_cta_decomposes
+  // CHECK: ttng.tc_gen5_mma %
+  // CHECK-NOT: ttng.tc_gen5_mma_scaled
+  tt.func public @mmav5_scaled_multi_cta_decomposes(
+      %a: tensor<256x64xf8E5M2, #blocked>,
+      %scale_a: tensor<256x2xi8, #blocked>,
+      %b: tensor<64x64xf8E5M2, #blocked>,
+      %scale_b: tensor<64x2xi8, #blocked>) -> tensor<256x64xf32, #blocked> {
+    %cst = arith.constant dense<0.000000e+00> : tensor<256x64xf32, #blocked>
+    %d = tt.dot_scaled %a scale %scale_a, %b scale %scale_b, %cst lhs = e5m2 rhs = e5m2 {fastMath = false} : tensor<256x64xf8E5M2, #blocked>, tensor<256x2xi8, #blocked> * tensor<64x64xf8E5M2, #blocked>, tensor<64x2xi8, #blocked> -> tensor<256x64xf32, #blocked>
+    tt.return %d : tensor<256x64xf32, #blocked>
+  }
+}
+
+// -----
+
 #blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [1, 4], order = [1, 0], CGALayout = [[1, 0]]}>
 #packed = #ttg.blocked<{sizePerThread = [1, 1, 2], threadsPerWarp = [1, 32, 1], warpsPerCTA = [1, 4, 1], order = [2, 1, 0], CGALayout = [[1, 0, 0]]}>
 module attributes {"ttg.num-ctas" = 2 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "cuda:100", "ttg.threads-per-warp" = 32 : i32} {

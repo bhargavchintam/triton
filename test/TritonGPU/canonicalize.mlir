@@ -446,3 +446,33 @@ tt.func @gsan_descriptor_predicate(%desc: !tt.tensordesc<4x4xf32>, %x: i32, %y: 
   tti.experimental_gsan_tensordesc_access %desc[%x, %y], false, %true : !tt.tensordesc<4x4xf32>
   tt.return
 }
+
+// -----
+
+// A convert_layout that moves data between CTAs cannot fold into a local_alloc:
+// the alloc only writes the part of the tensor each CTA already holds.
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [2, 2], order = [1, 0], CGALayout = [[1, 0]]}>
+#blocked1 = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [1, 4], order = [1, 0], CGALayout = [[1, 0]]}>
+#broadcast = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [2, 2], order = [1, 0], CGALayout = [[0, 0]]}>
+#shared = #ttg.nvmma_shared<{swizzlingByteWidth = 128, transposed = false, elementBitWidth = 16, CGALayout = [[0, 0]]}>
+#shared1 = #ttg.nvmma_shared<{swizzlingByteWidth = 128, transposed = false, elementBitWidth = 16, CGALayout = [[1, 0]]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-warps" = 4 : i32, "ttg.num-ctas" = 2 : i32, ttg.target = "cuda:100", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: @local_alloc_keeps_cross_cta_convert
+  // CHECK: %[[CVT:.+]] = ttg.convert_layout %arg0
+  // CHECK: ttg.local_alloc %[[CVT]]
+  tt.func @local_alloc_keeps_cross_cta_convert(%arg0: tensor<128x64xf16, #blocked>) -> !ttg.memdesc<128x64xf16, #shared, #smem> {
+    %0 = ttg.convert_layout %arg0 : tensor<128x64xf16, #blocked> -> tensor<128x64xf16, #broadcast>
+    %1 = ttg.local_alloc %0 : (tensor<128x64xf16, #broadcast>) -> !ttg.memdesc<128x64xf16, #shared, #smem>
+    tt.return %1 : !ttg.memdesc<128x64xf16, #shared, #smem>
+  }
+  // A convert that stays inside each CTA still folds.
+  // CHECK-LABEL: @local_alloc_folds_same_cta_convert
+  // CHECK-NOT: ttg.convert_layout
+  // CHECK: ttg.local_alloc %arg0
+  tt.func @local_alloc_folds_same_cta_convert(%arg0: tensor<128x64xf16, #blocked>) -> !ttg.memdesc<128x64xf16, #shared1, #smem> {
+    %0 = ttg.convert_layout %arg0 : tensor<128x64xf16, #blocked> -> tensor<128x64xf16, #blocked1>
+    %1 = ttg.local_alloc %0 : (tensor<128x64xf16, #blocked1>) -> !ttg.memdesc<128x64xf16, #shared1, #smem>
+    tt.return %1 : !ttg.memdesc<128x64xf16, #shared1, #smem>
+  }
+}

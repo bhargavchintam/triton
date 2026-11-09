@@ -161,8 +161,14 @@ getSharedMemoryMMAOperand(Value v, mlir::PatternRewriter &rewriter, int opIdx,
   OpBuilder::InsertionGuard g(rewriter);
   auto vType = cast<RankedTensorType>(v.getType());
   Value arg = v;
-  while (auto cvtOp = arg.getDefiningOp<ConvertLayoutOp>())
+  while (auto cvtOp = arg.getDefiningOp<ConvertLayoutOp>()) {
+    // A conversion that moves data between CTAs has to stay: the local_alloc
+    // below only writes the part of the operand this CTA already holds.
+    if (getCGALayout(cvtOp.getSrc().getType().getEncoding()) !=
+        getCGALayout(cvtOp.getType().getEncoding()))
+      break;
     arg = cvtOp.getSrc();
+  }
   // Preserve the source memory order, but use the MMA operand's CTA layout.
   auto order = getOrderForMemory(cast<RankedTensorType>(arg.getType()));
 
@@ -958,6 +964,11 @@ public:
     if (dotOp.getAScale() == nullptr || dotOp.getBScale() == nullptr) {
       return failure();
     }
+
+    // The operands keep their default layouts here, which split B along K when
+    // there are several CTAs. Decompose instead, so B reaches each CTA whole.
+    if (lookupNumCTAs(dotOp) != 1)
+      return failure();
 
     // get MMA encoding for the given number of warps
     auto retShapePerCTA = getShapePerCTA(oldRetType);

@@ -294,6 +294,11 @@ struct CanonicalizeConvertFromAlloc
     auto convert = op.getSrc().getDefiningOp<ConvertLayoutOp>();
     if (!convert)
       return failure();
+    // A conversion that moves data between CTAs has to stay: the alloc only
+    // writes the part of the tensor each CTA already holds.
+    if (getCGALayout(convert.getSrc().getType().getEncoding()) !=
+        getCGALayout(convert.getType().getEncoding()))
+      return failure();
     rewriter.replaceOpWithNewOp<triton::gpu::LocalAllocOp>(
         op, op->getResult(0).getType(), convert.getSrc());
     return mlir::success();
