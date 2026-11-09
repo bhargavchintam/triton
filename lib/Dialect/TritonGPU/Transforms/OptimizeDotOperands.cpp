@@ -52,16 +52,16 @@ public:
     // type inference of MemDescTransOp simply swap the order but doesn't fix
     // the vec and maxPhase for the YType, hence it would causing incorrect
     // swizzling code.
+    //
+    // The alloc holds the tensor before the transpose, so it keeps that
+    // tensor's CTA split. MemDescTransOp transposes the split for the
+    // local_load below.
     auto ctx = getContext();
-    auto oldCGALayout = triton::gpu::getCGALayout(srcTy.getEncoding());
-    auto newLl =
-        transposeLinearLayout(oldCGALayout.getLinearLayout(), trans.getOrder());
-    auto newCGALayout = CGAEncodingAttr::get(ctx, std::move(newLl));
-    auto newInnerCvtEnc =
-        SwizzledSharedEncodingAttr::get(ctx, cvtEncoding, srcTy.getShape(),
-                                        /*order=*/getOrderForMemory(srcTy),
-                                        newCGALayout, srcTy.getElementType(),
-                                        /*needTrans=*/true);
+    auto cgaLayout = triton::gpu::getCGALayout(srcTy.getEncoding());
+    auto newInnerCvtEnc = SwizzledSharedEncodingAttr::get(
+        ctx, cvtEncoding, srcTy.getShape(),
+        /*order=*/getOrderForMemory(srcTy), cgaLayout, srcTy.getElementType(),
+        /*needTrans=*/true);
     if (newInnerCvtEnc == cvtEncoding)
       return failure();
     rewriter.setInsertionPoint(trans);

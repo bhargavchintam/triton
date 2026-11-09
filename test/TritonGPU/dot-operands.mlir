@@ -365,3 +365,27 @@ module attributes {"ttg.target" = "cuda:90", "ttg.num-ctas" = 1 : i32, "ttg.num-
     tt.return %w#0 : tensor<128x256xf32, #mma_desc>
   }
 }
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [8, 1], order = [1, 0], CGALayout = [[1, 0]]}>
+#blocked_trans = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [32, 1], warpsPerCTA = [1, 8], order = [0, 1], CGALayout = [[0, 1]]}>
+#blocked_dot = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [1, 32], warpsPerCTA = [4, 2], order = [1, 0], CGALayout = [[0, 1]]}>
+#smem = #ttg.shared_memory
+module attributes {"ttg.num-ctas" = 2 : i32, "ttg.num-warps" = 8 : i32, ttg.target = "cuda:100", "ttg.threads-per-warp" = 32 : i32} {
+  // The shared buffer keeps the CTA split of the tensor stored in it, so an
+  // async copy into it stays inside one CTA, and the transposed view is split
+  // like the dot operand.
+  // CHECK-DAG: #[[$SHARED:.*]] = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [1, 0], CGALayout = {{\[\[1, 0\]\]}}}>
+  // CHECK-DAG: #[[$SHARED_TRANS:.*]] = #ttg.swizzled_shared<{vec = 1, perPhase = 1, maxPhase = 1, order = [0, 1], CGALayout = {{\[\[0, 1\]\]}}}>
+  // CHECK-LABEL: @dot_transposed_operand_two_ctas
+  tt.func public @dot_transposed_operand_two_ctas(%b: tensor<128x32xf32, #blocked>, %a: tensor<2x32xf32, #ttg.dot_op<{opIdx = 0, parent = #blocked_dot}>>, %acc: tensor<2x128xf32, #blocked_dot>) -> tensor<2x128xf32, #blocked_dot> {
+    // CHECK: %[[ALLOC:.*]] = ttg.local_alloc %{{.*}} : (tensor<128x32xf32, #{{.*}}>) -> !ttg.memdesc<128x32xf32, #[[$SHARED]], #smem>
+    // CHECK: %[[TRANS:.*]] = ttg.memdesc_trans %[[ALLOC]] {order = array<i32: 1, 0>} : !ttg.memdesc<128x32xf32, #[[$SHARED]], #smem> -> !ttg.memdesc<32x128xf32, #[[$SHARED_TRANS]], #smem>
+    // CHECK: ttg.local_load %[[TRANS]]
+    %t = tt.trans %b {order = array<i32: 1, 0>} : tensor<128x32xf32, #blocked> -> tensor<32x128xf32, #blocked_trans>
+    %bd = ttg.convert_layout %t : tensor<32x128xf32, #blocked_trans> -> tensor<32x128xf32, #ttg.dot_op<{opIdx = 1, parent = #blocked_dot}>>
+    %r = tt.dot %a, %bd, %acc : tensor<2x32xf32, #ttg.dot_op<{opIdx = 0, parent = #blocked_dot}>> * tensor<32x128xf32, #ttg.dot_op<{opIdx = 1, parent = #blocked_dot}>> -> tensor<2x128xf32, #blocked_dot>
+    tt.return %r : tensor<2x128xf32, #blocked_dot>
+  }
+}
